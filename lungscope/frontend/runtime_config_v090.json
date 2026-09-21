@@ -1,0 +1,7 @@
+{
+  "version": "0.9.0",
+  "apiBase": "/api/model",
+  "apiMode": "proxy",
+  "requestTimeoutMs": 420000,
+  "architecture": "split-gpu-model-service"
+}
