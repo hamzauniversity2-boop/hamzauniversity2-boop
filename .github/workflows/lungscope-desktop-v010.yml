@@ -1,0 +1,96 @@
+name: Build LungScope Desktop v0.10.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["lungscope-desktop-v010"]
+    paths:
+      - "desktop-ci-v010/**"
+      - ".github/workflows/lungscope-desktop-v010.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-installer:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout desktop branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct frozen desktop source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem 'desktop-ci-v010/installer-src/part*.b64' | Sort-Object Name
+          if ($parts.Count -ne 4) { throw "Expected 4 installer source parts, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('desktop-source.zip', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash 'desktop-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '1756e08b415c879cc32009495d3b6a58ff0228f9e097ad4e37d34eaa8dd24ebe') {
+            throw "Desktop source integrity mismatch: $hash"
+          }
+          Expand-Archive 'desktop-source.zip' -DestinationPath '.' -Force
+          if (!(Test-Path 'desktop/src-tauri/tauri.conf.json')) { throw 'Tauri source reconstruction failed.' }
+
+      - name: Reconstruct validated LungScope frontend
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'desktop/frontend' | Out-Null
+          $chunks = Get-ChildItem 'lungscope/frontend/chunks/part*.txt' | Sort-Object Name
+          if ($chunks.Count -lt 1) { throw 'Validated LungScope frontend chunks are missing.' }
+          $b64 = ($chunks | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $compressed = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes('frontend.gz', $compressed)
+          $input = [IO.File]::OpenRead('frontend.gz')
+          try {
+            $gzip = [IO.Compression.GZipStream]::new($input, [IO.Compression.CompressionMode]::Decompress)
+            try {
+              $output = [IO.File]::Create('desktop/frontend/index.html')
+              try { $gzip.CopyTo($output) } finally { $output.Dispose() }
+            } finally { $gzip.Dispose() }
+          } finally { $input.Dispose() }
+          if ((Get-Item 'desktop/frontend/index.html').Length -lt 100000) { throw 'Frontend reconstruction is unexpectedly small.' }
+          python 'desktop-ci-v010/patch_frontend.py'
+
+      - name: Validate desktop source before compilation
+        shell: pwsh
+        run: |
+          python -m py_compile desktop/engine/app/*.py
+          python -c "import json; json.load(open('desktop/src-tauri/tauri.conf.json', encoding='utf-8')); json.load(open('desktop/package.json', encoding='utf-8')); print('desktop JSON/Python validation PASS')"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri frontend/build dependencies
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+
+      - name: Build Windows NSIS installer
+        working-directory: desktop
+        env:
+          CI: 'true'
+        run: npm run tauri build
+
+      - name: List Windows bundle outputs
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path 'desktop/src-tauri/target/release/bundle') {
+            Get-ChildItem 'desktop/src-tauri/target/release/bundle' -Recurse -File | Select-Object FullName,Length
+          }
+
+      - name: Upload LungScope installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LungScope-Desktop-v0.10.0-Windows-x64
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            desktop/src-tauri/target/release/LungScope.exe
+          if-no-files-found: error
+          retention-days: 14
