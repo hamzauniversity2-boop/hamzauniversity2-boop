@@ -42,9 +42,6 @@ jobs:
               parts.append(clean)
               print(f'{path.name}: sanitized chars={len(clean)}')
 
-          # The GitHub contents connector introduced one base64-valid character into
-          # the final staging chunk. Recover the exact frozen chunk by its independent
-          # SHA-256, then independently verify the decoded ZIP SHA-256 below.
           last = parts[-1]
           last_hash = hashlib.sha256(last.encode('ascii')).hexdigest()
           if last_hash != LAST_CHUNK_SHA256:
@@ -62,10 +59,8 @@ jobs:
               parts[-1] = repaired
 
           joined = ''.join(parts)
-          print(f'Reconstructed source base64 chars: {len(joined)}')
           if len(joined) != 72412:
               raise SystemExit(f'Unexpected reconstructed base64 length: {len(joined)}')
-
           payload = base64.b64decode(joined, validate=True)
           digest = hashlib.sha256(payload).hexdigest()
           print(f'Desktop source bytes={len(payload)} sha256={digest}')
@@ -98,11 +93,28 @@ jobs:
           if ((Get-Item 'desktop/frontend/index.html').Length -lt 100000) { throw 'Frontend reconstruction is unexpectedly small.' }
           python 'desktop-ci-v010/patch_frontend.py'
 
+      - name: Apply Windows desktop release patches
+        shell: pwsh
+        run: |
+          $main = Get-Content 'desktop/src-tauri/src/main.rs' -Raw
+          if ($main -notmatch 'windows_subsystem') {
+            $main = "#![cfg_attr(not(debug_assertions), windows_subsystem = `"windows`")]`r`n`r`n" + $main
+            Set-Content 'desktop/src-tauri/src/main.rs' -Value $main -Encoding UTF8
+          }
+          $lib = Get-Content 'desktop/src-tauri/src/lib.rs' -Raw
+          $lib = $lib.Replace('fn app_data(app: &AppHandle) -> Result<PathBuf, String> {', 'fn app_data(_app: &AppHandle) -> Result<PathBuf, String> {')
+          $lib = $lib.Replace('let p = app.path().app_local_data_dir().map_err(|e| e.to_string())?;', 'let p = _app.path().app_local_data_dir().map_err(|e| e.to_string())?;')
+          Set-Content 'desktop/src-tauri/src/lib.rs' -Value $lib -Encoding UTF8
+
       - name: Validate desktop source before compilation
         shell: pwsh
         run: |
-          python -m py_compile desktop/engine/app/*.py
+          Get-ChildItem 'desktop/engine/app/*.py' | ForEach-Object {
+            python -m py_compile $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           python -c "import json; json.load(open('desktop/src-tauri/tauri.conf.json', encoding='utf-8')); json.load(open('desktop/package.json', encoding='utf-8')); print('desktop JSON/Python validation PASS')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Setup Node 22
         uses: actions/setup-node@v4
