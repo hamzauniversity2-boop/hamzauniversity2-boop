@@ -22,18 +22,59 @@ jobs:
       - name: Reconstruct frozen desktop source
         shell: pwsh
         run: |
-          $parts = Get-ChildItem 'desktop-ci-v010/installer-src/part*.b64' | Sort-Object Name
-          if ($parts.Count -ne 4) { throw "Expected 4 installer source parts, found $($parts.Count)" }
-          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
-          $b64 = $b64 -replace '[^A-Za-z0-9+/=]', ''
-          Write-Host "Sanitized source base64 chars: $($b64.Length)"
-          $bytes = [Convert]::FromBase64String($b64)
-          [IO.File]::WriteAllBytes('desktop-source.zip', $bytes)
-          $hash = (Get-FileHash 'desktop-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "Desktop source SHA256: $hash"
-          if ($hash -ne '1756e08b415c879cc32009495d3b6a58ff0228f9e097ad4e37d34eaa8dd24ebe') {
-            throw "Desktop source integrity mismatch: $hash"
-          }
+          @'
+          import base64
+          import hashlib
+          import pathlib
+          import re
+
+          ARCHIVE_SHA256 = '1756e08b415c879cc32009495d3b6a58ff0228f9e097ad4e37d34eaa8dd24ebe'
+          LAST_CHUNK_SHA256 = '3e0928030bc916f60624a6f3e06f329fac3e9b920d5bb7ccb58a75f70f3ad071'
+
+          paths = sorted(pathlib.Path('desktop-ci-v010/installer-src').glob('part*.b64'))
+          if len(paths) != 4:
+              raise SystemExit(f'Expected 4 installer source parts, found {len(paths)}')
+
+          parts = []
+          for path in paths:
+              raw = path.read_text(encoding='utf-8')
+              clean = re.sub(r'[^A-Za-z0-9+/=]', '', raw)
+              parts.append(clean)
+              print(f'{path.name}: sanitized chars={len(clean)}')
+
+          # The GitHub contents connector introduced one base64-valid character into
+          # the final staging chunk. Recover the exact frozen chunk by its independent
+          # SHA-256, then independently verify the decoded ZIP SHA-256 below.
+          last = parts[-1]
+          last_hash = hashlib.sha256(last.encode('ascii')).hexdigest()
+          if last_hash != LAST_CHUNK_SHA256:
+              if len(last) != 18413:
+                  raise SystemExit(f'Unexpected final chunk length {len(last)}; expected 18412 or recoverable 18413')
+              repaired = None
+              for i in range(len(last)):
+                  candidate = last[:i] + last[i + 1:]
+                  if hashlib.sha256(candidate.encode('ascii')).hexdigest() == LAST_CHUNK_SHA256:
+                      repaired = candidate
+                      print(f'Recovered exact final chunk by removing staged character at index {i}: {last[i]!r}')
+                      break
+              if repaired is None:
+                  raise SystemExit('Could not recover exact final chunk from one-character staging defect')
+              parts[-1] = repaired
+
+          joined = ''.join(parts)
+          print(f'Reconstructed source base64 chars: {len(joined)}')
+          if len(joined) != 72412:
+              raise SystemExit(f'Unexpected reconstructed base64 length: {len(joined)}')
+
+          payload = base64.b64decode(joined, validate=True)
+          digest = hashlib.sha256(payload).hexdigest()
+          print(f'Desktop source bytes={len(payload)} sha256={digest}')
+          if digest != ARCHIVE_SHA256:
+              raise SystemExit(f'Desktop source integrity mismatch: {digest}')
+          pathlib.Path('desktop-source.zip').write_bytes(payload)
+          print('Frozen desktop source integrity PASS')
+          '@ | Set-Content -Encoding UTF8 reconstruct_source.py
+          python reconstruct_source.py
           Expand-Archive 'desktop-source.zip' -DestinationPath '.' -Force
           if (!(Test-Path 'desktop/src-tauri/tauri.conf.json')) { throw 'Tauri source reconstruction failed.' }
 
