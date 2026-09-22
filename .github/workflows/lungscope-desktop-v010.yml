@@ -24,8 +24,16 @@ jobs:
         run: |
           $parts = Get-ChildItem 'desktop-ci-v010/installer-src/part*.b64' | Sort-Object Name
           if ($parts.Count -ne 4) { throw "Expected 4 installer source parts, found $($parts.Count)" }
-          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
-          [IO.File]::WriteAllBytes('desktop-source.zip', [Convert]::FromBase64String($b64))
+          $out = [IO.File]::Open('desktop-source.zip', [IO.FileMode]::Create, [IO.FileAccess]::Write)
+          try {
+            foreach ($part in $parts) {
+              $text = (Get-Content $part.FullName -Raw).Trim()
+              $bytes = [Convert]::FromBase64String($text)
+              $out.Write($bytes, 0, $bytes.Length)
+            }
+          } finally {
+            $out.Dispose()
+          }
           $hash = (Get-FileHash 'desktop-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne '1756e08b415c879cc32009495d3b6a58ff0228f9e097ad4e37d34eaa8dd24ebe') {
             throw "Desktop source integrity mismatch: $hash"
@@ -91,6 +99,6 @@ jobs:
           name: LungScope-Desktop-v0.10.0-Windows-x64
           path: |
             desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-            desktop/src-tauri/target/release/LungScope.exe
+            desktop/src-tauri/target/release/lungscope-desktop.exe
           if-no-files-found: error
           retention-days: 14
