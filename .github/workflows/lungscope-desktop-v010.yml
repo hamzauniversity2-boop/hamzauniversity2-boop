@@ -24,17 +24,13 @@ jobs:
         run: |
           $parts = Get-ChildItem 'desktop-ci-v010/installer-src/part*.b64' | Sort-Object Name
           if ($parts.Count -ne 4) { throw "Expected 4 installer source parts, found $($parts.Count)" }
-          $out = [IO.File]::Open('desktop-source.zip', [IO.FileMode]::Create, [IO.FileAccess]::Write)
-          try {
-            foreach ($part in $parts) {
-              $text = (Get-Content $part.FullName -Raw).Trim()
-              $bytes = [Convert]::FromBase64String($text)
-              $out.Write($bytes, 0, $bytes.Length)
-            }
-          } finally {
-            $out.Dispose()
-          }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $b64 = $b64 -replace '[^A-Za-z0-9+/=]', ''
+          Write-Host "Sanitized source base64 chars: $($b64.Length)"
+          $bytes = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes('desktop-source.zip', $bytes)
           $hash = (Get-FileHash 'desktop-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Desktop source SHA256: $hash"
           if ($hash -ne '1756e08b415c879cc32009495d3b6a58ff0228f9e097ad4e37d34eaa8dd24ebe') {
             throw "Desktop source integrity mismatch: $hash"
           }
